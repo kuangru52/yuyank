@@ -141,6 +141,24 @@ object RimeEngine {
         return result
     }
 
+    private fun getPrefixPinyin(buf: String, chunkCount: Int, rimeSchema: String): String {
+        val sb = StringBuilder()
+        val count = minOf(chunkCount, (buf.length + 1) / 2)
+        for (i in 0 until count) {
+            val start = i * 2
+            val end = minOf(start + 2, buf.length)
+            val chunk = buf.substring(start, end)
+            val selected = sp10SelectedPinyins[i]
+            if (selected != null) {
+                sb.append(selected)
+            } else {
+                val validPinyins = T9DoublePinYinUtils.keyToPinyin(rimeSchema, chunk)
+                sb.append(validPinyins.firstOrNull() ?: chunk)
+            }
+        }
+        return sb.toString()
+    }
+
     private fun updateSp10RimeAndCandidates() {
         val rimeSchema = getCurrentRimeSchema()
         val buf = sp10Buffer.toString()
@@ -223,9 +241,38 @@ object RimeEngine {
         }
 
         roundRobinCandidates.sortByDescending { it.second }
-        val mergedCandidates = roundRobinCandidates.map { it.first }
+        var mergedCandidates = roundRobinCandidates.map { it.first }
 
-        // 3. Restore primaryPinyin in Rime so preedit composition is active
+        // 3. For long inputs (>= 3 chunks): If NO full N-character dictionary word exists,
+        // break down long input by placing real 2-character / 3-character dictionary words at the front
+        if (totalChunks >= 3) {
+            val fullDictWords = Rime.getAssociateList(primaryPinyin).filterNotNull().filter { it.length >= totalChunks }
+            if (fullDictWords.isEmpty()) {
+                val prefixCandidates = ArrayList<CandidateListItem>()
+                val prefixSeen = HashSet<String>()
+
+                for (prefixLen in minOf(totalChunks - 1, 4) downTo 2) {
+                    val prefixPinyin = getPrefixPinyin(buf, prefixLen, rimeSchema)
+                    val words = Rime.getAssociateList(prefixPinyin).filterNotNull().filter { it.isNotEmpty() }
+                    for (w in words) {
+                        if (prefixSeen.add(w)) {
+                            prefixCandidates.add(CandidateListItem("", w))
+                        }
+                    }
+                }
+
+                if (prefixCandidates.isNotEmpty()) {
+                    for (cand in mergedCandidates) {
+                        if (prefixSeen.add(cand.text)) {
+                            prefixCandidates.add(cand)
+                        }
+                    }
+                    mergedCandidates = prefixCandidates
+                }
+            }
+        }
+
+        // 4. Restore primaryPinyin in Rime so preedit composition is active
         Rime.clearComposition()
         primaryPinyin.forEach { ch ->
             Rime.processKey(ch.code, 0)
