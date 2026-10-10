@@ -126,15 +126,20 @@ object RimeEngine {
         return fullChunkCount
     }
 
+    private fun queryRimeCandidates(pinyin: String): List<CandidateListItem> {
+        Rime.clearComposition()
+        pinyin.forEach { ch ->
+            Rime.processKey(ch.code, 0)
+        }
+        return Rime.getRimeContext()?.candidates?.asList() ?: emptyList()
+    }
+
     private fun scorePinyinCombination(pinyin: String): Int {
         if (pinyin.isEmpty()) return 0
-        val words = Rime.getAssociateList(pinyin)
-        if (words.isEmpty()) return 0
-        
-        val firstWord = words.firstOrNull() ?: return 0
-        var score = firstWord.length * 1000
-        score += minOf(words.size, 20) * 10
-        return score
+        val cands = queryRimeCandidates(pinyin)
+        if (cands.isEmpty()) return 0
+        val firstCandText = cands.first().text
+        return firstCandText.length * 1000 + minOf(cands.size, 10) * 10
     }
 
     private fun generateAllCombinations(chunkLists: List<List<String>>): List<String> {
@@ -148,8 +153,8 @@ object RimeEngine {
                 }
             }
             result = next
-            if (result.size > 128) {
-                result = result.sortedByDescending { scorePinyinCombination(it) }.take(64)
+            if (result.size > 64) {
+                result = result.sortedByDescending { scorePinyinCombination(it) }.take(32)
             }
         }
         return result
@@ -193,11 +198,7 @@ object RimeEngine {
         val maxCandidatesPerCombo = if (totalChunks == 1) 5 else 10
 
         for (comboPinyin in topCombos) {
-            Rime.clearComposition()
-            comboPinyin.forEach { ch ->
-                Rime.processKey(ch.code, 0)
-            }
-            val cands = Rime.getRimeContext()?.candidates?.asList() ?: emptyList()
+            val cands = queryRimeCandidates(comboPinyin)
             if (cands.isNotEmpty()) {
                 comboCandidatesList.add(cands.take(maxCandidatesPerCombo))
             }
