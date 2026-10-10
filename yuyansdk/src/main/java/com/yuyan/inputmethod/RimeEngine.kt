@@ -126,22 +126,6 @@ object RimeEngine {
         return fullChunkCount
     }
 
-    private fun queryRimeCandidates(pinyin: String): List<CandidateListItem> {
-        Rime.clearComposition()
-        pinyin.forEach { ch ->
-            Rime.processKey(ch.code, 0)
-        }
-        return Rime.getRimeContext()?.candidates?.asList() ?: emptyList()
-    }
-
-    private fun scorePinyinCombination(pinyin: String): Int {
-        if (pinyin.isEmpty()) return 0
-        val cands = queryRimeCandidates(pinyin)
-        if (cands.isEmpty()) return 0
-        val firstCandText = cands.first().text
-        return firstCandText.length * 1000 + minOf(cands.size, 10) * 10
-    }
-
     private fun generateAllCombinations(chunkLists: List<List<String>>): List<String> {
         if (chunkLists.isEmpty()) return emptyList()
         var result = listOf("")
@@ -153,9 +137,6 @@ object RimeEngine {
                 }
             }
             result = next
-            if (result.size > 64) {
-                result = result.sortedByDescending { scorePinyinCombination(it) }.take(32)
-            }
         }
         return result
     }
@@ -181,31 +162,46 @@ object RimeEngine {
                 if (selected != null && validPinyins.contains(selected)) {
                     chunkPinyinLists.add(listOf(selected))
                 } else {
-                    chunkPinyinLists.add(validPinyins.toList().ifEmpty { listOf(chunk) })
+                    chunkPinyinLists.add(validPinyins.take(2).toList().ifEmpty { listOf(chunk) })
                 }
             } else if (chunk.length == 1) {
                 val initials = T9DoublePinYinUtils.keyToPinyin(rimeSchema, chunk)
-                chunkPinyinLists.add(initials.toList().ifEmpty { listOf(chunk) })
+                chunkPinyinLists.add(initials.take(2).toList().ifEmpty { listOf(chunk) })
             }
         }
 
-        val rawCombinations = generateAllCombinations(chunkPinyinLists)
-        val scoredCombinations = rawCombinations.sortedByDescending { scorePinyinCombination(it) }
-        val topCombos = scoredCombinations.take(8)
+        val combinations = generateAllCombinations(chunkPinyinLists).take(6)
 
-        // 1. Query Rime C++ engine for real candidate lists for each valid pinyin combination
+        // Cache JNI queries during this single frame pass to eliminate redundant C++ calls
+        val pinyinCache = HashMap<String, List<CandidateListItem>>()
+        fun getCachedCandidates(pinyin: String): List<CandidateListItem> {
+            return pinyinCache.getOrPut(pinyin) {
+                Rime.clearComposition()
+                pinyin.forEach { ch -> Rime.processKey(ch.code, 0) }
+                Rime.getRimeContext()?.candidates?.asList() ?: emptyList()
+            }
+        }
+
+        val scoredCombinations = combinations.sortedByDescending { combo ->
+            val cands = getCachedCandidates(combo)
+            if (cands.isEmpty()) 0
+            else cands.first().text.length * 1000 + minOf(cands.size, 10) * 10
+        }
+
+        val primaryPinyin = scoredCombinations.firstOrNull() ?: buf
+
+        // 1. Collect candidates for top combinations using cached queries
         val comboCandidatesList = ArrayList<List<CandidateListItem>>()
         val maxCandidatesPerCombo = if (totalChunks == 1) 5 else 10
 
-        for (comboPinyin in topCombos) {
-            val cands = queryRimeCandidates(comboPinyin)
+        for (comboPinyin in scoredCombinations) {
+            val cands = getCachedCandidates(comboPinyin)
             if (cands.isNotEmpty()) {
                 comboCandidatesList.add(cands.take(maxCandidatesPerCombo))
             }
         }
 
-        // 2. Multi-pronunciation Round-Robin Candidate Interleaving:
-        // Prioritize phrase length match (sentences/phrases first) > round-robin depth across pronunciations
+        // 2. Multi-pronunciation Round-Robin Candidate Interleaving
         val roundRobinCandidates = ArrayList<Pair<CandidateListItem, Int>>()
         val seenTexts = HashSet<String>()
 
@@ -230,7 +226,6 @@ object RimeEngine {
         val mergedCandidates = roundRobinCandidates.map { it.first }
 
         // 3. Restore primaryPinyin in Rime so preedit composition is active
-        val primaryPinyin = topCombos.firstOrNull() ?: buf
         Rime.clearComposition()
         primaryPinyin.forEach { ch ->
             Rime.processKey(ch.code, 0)
