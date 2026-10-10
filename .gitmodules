@@ -1,0 +1,3 @@
+[submodule "yuyansdk"]
+	path = yuyansdk
+	url = https://github.com/kuangru52/yuyank.git
